@@ -5,5 +5,5 @@
   "api_version": 1,
   "entry_point": "plugin.py",
   "description": "Auto-detects character namespaces in Maya and loads matching Dreamwall Pickers published under the DreamwallPicker custom path.",
-  "requires": ["ukore_menu", "publish_api"]
+  "requires": ["ukore_menu", "publish_api", "dreamwall_picker"]
 }

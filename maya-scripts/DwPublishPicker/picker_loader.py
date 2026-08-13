@@ -1,16 +1,22 @@
-"""DW Publish Picker Loader with Version Resolution and Selection Dialogs."""
+"""DW Publish Picker Loader with Safe Path Handling & Flexible Module Imports."""
 
 from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePath
 import maya.cmds as cmds
 
-from tmlib.module.PySide import QtWidgets
-from PublishApi import repo_paths
-from UkoreMenu import registry, MenuItemSpec
+# Safe PySide Fallback Import
+try:
+    from tmlib.module.PySide import QtWidgets
+except ImportError:
+    try:
+        from PySide6 import QtWidgets
+    except ImportError:
+        from PySide2 import QtWidgets
 
+from PublishApi import repo_paths
 
 _VERSION_PATTERN = re.compile(r"^v(\d{3})$", re.IGNORECASE)
 
@@ -21,6 +27,43 @@ def get_maya_main_window() -> QtWidgets.QWidget | None:
         if widget.objectName() == "MayaWindow":
             return widget
     return None
+
+
+def get_dreamwall_picker_dir() -> Path | None:
+    """Resolve physical path for 'DreamwallPicker' Custom Path using active repo."""
+    # ดึงค่าจาก PublishApi โดยตรงแบบสดๆ ไม่จำค่าความล้มเหลวไว้ใน Session
+    project, repo, repo_path = repo_paths.get_active_repo()
+    if not (project and repo and repo_path):
+        print("[DW Picker] No active project/repo found in UkoreHub.")
+        return None
+
+    # ดึง Custom Paths ของ Repo
+    custom_paths = repo_paths.get_custom_paths(project.id, repo.id)
+    target_cp = None
+    for cp in custom_paths:
+        cp_id = cp.get("id", "").lower()
+        cp_label = cp.get("label", "").lower()
+        if "dreamwallpicker" in cp_id or "dreamwallpicker" in cp_label or "dreamwall picker" in cp_label:
+            target_cp = cp
+            break
+
+    if not target_cp:
+        print("[DW Picker] Custom Path 'DreamwallPicker' is not configured for this repo.")
+        return None
+
+    # ล้าง slash/backslash ด้านหน้าและ normalize path
+    raw_path = target_cp.get("path", "").strip("/\\").replace("\\", "/")
+    if not raw_path:
+        print("[DW Picker] Configured Custom Path 'DreamwallPicker' path is empty.")
+        return None
+
+    full_path = repo_path / PurePath(raw_path)
+
+    if not full_path.is_dir():
+        print(f"[DW Picker] Target directory does not exist on disk: {full_path}")
+        return None
+
+    return full_path
 
 
 class PickerVersionDialog(QtWidgets.QDialog):
@@ -38,7 +81,6 @@ class PickerVersionDialog(QtWidgets.QDialog):
         self.selected_version: str | None = None
         self.choice = self.RESULT_CANCEL
 
-        # UI Layout
         layout = QtWidgets.QVBoxLayout(self)
 
         label_msg = QtWidgets.QLabel(
@@ -47,7 +89,6 @@ class PickerVersionDialog(QtWidgets.QDialog):
         )
         layout.addWidget(label_msg)
 
-        # Version Combobox (for Manual Pick)
         combo_layout = QtWidgets.QHBoxLayout()
         combo_layout.addWidget(QtWidgets.QLabel("Select Version:"))
         self.version_combo = QtWidgets.QComboBox()
@@ -57,7 +98,6 @@ class PickerVersionDialog(QtWidgets.QDialog):
         combo_layout.addWidget(self.version_combo)
         layout.addLayout(combo_layout)
 
-        # Action Buttons
         btn_layout = QtWidgets.QHBoxLayout()
         latest_str = available_versions[-1] if available_versions else "N/A"
         self.btn_latest = QtWidgets.QPushButton(f"Use Latest ({latest_str})")
@@ -69,7 +109,6 @@ class PickerVersionDialog(QtWidgets.QDialog):
         btn_layout.addWidget(self.btn_cancel)
         layout.addLayout(btn_layout)
 
-        # Signal Connections
         self.btn_latest.clicked.connect(self._on_latest)
         self.btn_pick.clicked.connect(self._on_pick)
         self.btn_cancel.clicked.connect(self.reject)
@@ -82,36 +121,6 @@ class PickerVersionDialog(QtWidgets.QDialog):
         self.choice = self.RESULT_PICK
         self.selected_version = self.version_combo.currentText()
         self.accept()
-
-
-def get_dreamwall_picker_dir() -> Path | None:
-    """Resolve physical path for 'DreamwallPicker' Custom Path from active repo."""
-    project, repo, repo_path = repo_paths.get_active_repo()
-    if not (project and repo and repo_path):
-        print("[DW Picker] No active project/repo found in UkoreHub.")
-        return None
-
-    custom_paths = repo_paths.get_custom_paths(project.id, repo.id)
-    target_cp = None
-    for cp in custom_paths:
-        cp_id = cp.get("id", "").lower()
-        cp_label = cp.get("label", "").lower()
-        if "dreamwallpicker" in cp_id or "dreamwallpicker" in cp_label or "dreamwall picker" in cp_label:
-            target_cp = cp
-            break
-
-    if not target_cp:
-        print("[DW Picker] Custom Path 'DreamwallPicker' is not configured for this repo.")
-        return None
-
-    rel_path = target_cp.get("path", "").lstrip("/\\")
-    full_path = repo_path / rel_path
-
-    if not full_path.is_dir():
-        print(f"[DW Picker] Target directory does not exist: {full_path}")
-        return None
-
-    return full_path
 
 
 def get_available_picker_versions(char_dir: Path) -> list[str]:
@@ -180,7 +189,6 @@ def import_all_picker() -> None:
     if hasattr(dwpicker, "_dwpicker") and hasattr(dwpicker._dwpicker, "clear"):
         dwpicker._dwpicker.clear()
 
-    # ดึงรายการ Namespace ทั้งหมดในฉากครั้งเดียวนอกลูปเพื่อ Performance
     scene_namespaces = [
         ns for ns in cmds.namespaceInfo(listOnlyNamespaces=True, recurse=True)
         if ns not in ("UI", "shared")
@@ -191,13 +199,9 @@ def import_all_picker() -> None:
         if not char_dir.is_dir():
             continue
 
-        # 1. ค้นหา Namespace ที่ตรงกับชื่อโฟลเดอร์ตัวละคร
         matching_ns = [ns for ns in scene_namespaces if char_folder.lower() in ns.lower()]
-
-        # 2. ค้นหา Node ในกรณีไม่มี Namespace (Scene Node)
         ls_scene = cmds.ls(f"{char_folder}*", type="transform") or cmds.ls(f"{char_folder}*")
 
-        # ถ้าไม่เจอทั้ง Namespace และ Node ในฉาก ให้ข้าม
         if not (matching_ns or ls_scene):
             continue
 
@@ -212,11 +216,7 @@ def import_all_picker() -> None:
         if not picker:
             continue
 
-        # กำหนด Target Namespace ให้ถูกต้อง
-        if matching_ns:
-            new_ns = matching_ns[0]
-        else:
-            new_ns = ""
+        new_ns = matching_ns[0] if matching_ns else ""
 
         for shape in picker.document.shapes:
             targets = shape.options.get("action.targets", [])
@@ -239,7 +239,16 @@ def import_all_picker() -> None:
 
 
 def register_menu() -> None:
-    """Register menu item into UkoreMenu."""
+    """Register menu item into UkoreMenu safely."""
+    try:
+        from UkoreMenu import registry, MenuItemSpec
+    except ImportError:
+        try:
+            from UkoreMenu.core import registry, MenuItemSpec
+        except ImportError as err:
+            print(f"[DW Picker] Cannot import UkoreMenu: {err}")
+            return
+
     registry.register_item(
         MenuItemSpec(
             id="dw_publish_picker",
