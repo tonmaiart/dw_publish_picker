@@ -253,7 +253,7 @@ def register_menu() -> None:
         MenuItemSpec(
             id="dw_publish_picker",
             label="Load DW Publish Pickers",
-            category="Animation",
+            category="General",
             command=import_all_picker,
             order=30,
         )
