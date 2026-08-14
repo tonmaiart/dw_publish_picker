@@ -35,6 +35,10 @@ def register(api) -> None:
     hooks = bridge.get("launch_hooks", {})
     hooks[TOOL_ID] = {
         "order": 100,
+        # Registers the automatic kAfterOpen scene-load callback before
+        # MayaLauncher's own `file -open`, so the very first scene open of
+        # the session triggers it too (see picker_loader.register_scene_open_callback).
+        "pre_open_mel": 'python("import DwPublishPicker");',
         "post_open_mel": 'python("import DwPublishPicker; DwPublishPicker.register_menu()");',
         "diagnostic_msg": "DwPublishPicker menu registered to UkoreMenu",
     }

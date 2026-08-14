@@ -6,6 +6,7 @@ import json
 import os
 import re
 from pathlib import Path, PurePath
+import maya.api.OpenMaya as om
 import maya.cmds as cmds
 
 # Safe PySide Fallback Import
@@ -298,6 +299,81 @@ def import_all_picker() -> None:
         picker.update()
 
     print("[DW Picker] Pickers successfully loaded.")
+
+
+def _scene_has_matching_character(picker_dir: Path) -> bool:
+    """Whether the current scene has any namespace/node matching one of the
+    character folders under picker_dir. Used by the automatic scene-open
+    trigger to stay silent (no dwpicker panel, no warnings) for scenes that
+    have nothing to do with any published Dreamwall Picker, instead of
+    popping an empty picker on every unrelated file open."""
+    scene_namespaces = [
+        ns for ns in cmds.namespaceInfo(listOnlyNamespaces=True, recurse=True)
+        if ns not in ("UI", "shared")
+    ]
+    for char_folder in os.listdir(picker_dir):
+        char_dir = picker_dir / char_folder
+        if not char_dir.is_dir():
+            continue
+        if any(char_folder.lower() in ns.lower() for ns in scene_namespaces):
+            return True
+        if cmds.ls(f"{char_folder}*", type="transform") or cmds.ls(f"{char_folder}*"):
+            return True
+    return False
+
+
+def auto_import_all_picker() -> None:
+    """Automatic counterpart to import_all_picker() for the kAfterOpen scene
+    callback below — same picker resolution/loading, but silent (no
+    cmds.warning noise for repos/scenes that simply don't use pickers) and
+    only runs once the newly opened scene actually contains a character
+    matching one of the DreamwallPicker folders."""
+    picker_dir = get_dreamwall_picker_dir()
+    if not picker_dir or not picker_dir.exists():
+        return
+    if not _scene_has_matching_character(picker_dir):
+        return
+    import_all_picker()
+
+
+def _auto_import_all_picker_deferred() -> None:
+    try:
+        auto_import_all_picker()
+    except Exception as exc:  # noqa: BLE001 - one bad auto-load must not break scene open
+        cmds.warning(f"[DW Picker] Automatic picker load failed: {exc}")
+
+
+def _on_scene_opened(*_args) -> None:
+    # Deferred, not inline: this callback runs synchronously inside Maya's
+    # kAfterOpen — still mid file-open transaction, where referenced
+    # namespaces/nodes this scan depends on aren't reliably queryable yet
+    # (same reasoning UkoreReferenceEditor's core.py documents for its own
+    # _deferred_load). evalDeferred runs it once Maya reaches its own idle
+    # point after the open transaction finishes.
+    cmds.evalDeferred(_auto_import_all_picker_deferred)
+
+
+_scene_open_callback_id = None
+
+
+def register_scene_open_callback() -> None:
+    """Auto-loads DW Publish Pickers on every scene open — own independent
+    kAfterOpen MSceneMessage callback, same pattern MayaToolkit's
+    UkoreMaya/__init__.py uses to wire up Ukore Reference Editor's
+    auto_check_and_redirect, but registered here rather than by editing
+    that shared dispatcher, per this repo's plugin-folder isolation rule
+    (Maya allows multiple independent callbacks on the same message).
+    Must be called from pre_open_mel (see plugin.py's launch_hooks) so
+    it's already registered before MayaLauncher's own `file -open`
+    command — otherwise the very first scene open of the Maya session
+    wouldn't trigger it, only later manual File > Open calls would.
+    """
+    global _scene_open_callback_id
+    if _scene_open_callback_id is not None:
+        return
+    _scene_open_callback_id = om.MSceneMessage.addCallback(
+        om.MSceneMessage.kAfterOpen, _on_scene_opened
+    )
 
 
 def register_menu() -> None:
