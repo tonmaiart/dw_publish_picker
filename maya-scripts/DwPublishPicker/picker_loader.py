@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path, PurePath
@@ -168,6 +169,65 @@ def resolve_picker_file(char_dir: Path, char_name: str) -> Path | None:
     return None
 
 
+def _find_image_in_dir(directory: Path, filename: str) -> Path | None:
+    """Recursively search a directory for a file with the given name."""
+    if not directory.is_dir():
+        return None
+    for candidate in directory.rglob(filename):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def fix_picker_image_paths(picker_path: Path) -> None:
+    """Repath any missing shape 'image.path' entries to a same-named file found
+    under this Picker.json's own version folder, so dwpicker's blocking
+    MissingImages dialog never fires for images that simply moved with a
+    publish (dwpicker's add_picker_from_file checks existence right after
+    json.load, before UkoreHub ever gets a chance to intervene).
+    """
+    try:
+        with open(picker_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as err:
+        print(f"[DW Picker] Error reading {picker_path}: {err}")
+        return
+
+    version_dir = picker_path.parent
+    modified = False
+
+    for shape in data.get("shapes", []):
+        img_path = shape.get("image.path")
+        if not img_path:
+            continue
+
+        # dwpicker paths may contain env vars (e.g. $DWPICKER_PROJECT_DIRECTORY/...)
+        if os.path.exists(os.path.expandvars(img_path)):
+            continue
+
+        img_filename = os.path.basename(img_path)
+        if not img_filename:
+            continue
+
+        found = _find_image_in_dir(version_dir, img_filename)
+        if not found:
+            print(f"[DW Picker] Could not auto-resolve missing image: {img_path}")
+            continue
+
+        shape["image.path"] = str(found).replace("\\", "/")
+        modified = True
+
+    if not modified:
+        return
+
+    try:
+        with open(picker_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[DW Picker] Auto-resolved missing image paths for: {picker_path.name}")
+    except Exception as err:
+        print(f"[DW Picker] Warning: Could not rewrite {picker_path}: {err}")
+
+
 def import_all_picker() -> None:
     """Scan Maya scene for character matching folders and open Picker files."""
     picker_dir = get_dreamwall_picker_dir()
@@ -208,6 +268,8 @@ def import_all_picker() -> None:
         picker_path = resolve_picker_file(char_dir, char_folder)
         if not picker_path:
             continue
+
+        fix_picker_image_paths(picker_path)
 
         print(f"[DW Picker] Opening picker: {picker_path}")
         dwpicker.open_picker_file(str(picker_path))
